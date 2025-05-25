@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>9호선 지하철 운행 시각화</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .controls { margin-bottom: 20px; }
+    #summary { margin-top: 20px; }
+    #summary p { margin: 4px 0; }
+    .chart { position: relative; width: 100%; border-top: 1px solid #ccc; padding-top: 10px; }
+    .train-row { position: relative; height: 24px; margin-bottom: 8px; }
+    .train-bar {
+      position: absolute;
+      height: 100%;
+      background: #AA2E5F; /* 9호선 대표색 */
+      border-radius: 4px;
+    }
+    .train-row span {
+      position: absolute;
+      left: 0;
+      top: 0;
+      font-size: 12px;
+      line-height: 24px;
+      padding-left: 4px;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>9호선 지하철 운행 시각화</h1>
+  <div class="controls">
+    <label>입출고 편성표: <input type="file" id="file1" accept=".xlsx"></label>
+    <label>행로표 (1회만 업로드): <input type="file" id="file2" accept=".xlsx"></label>
+    <button id="load">시각화</button>
+  </div>
+  <div id="summary"></div>
+  <div id="chart" class="chart"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script>
+    // 역 순서 및 구간 소요시간 (분 단위)
+    const generalStations = [
+      "개화","김포공항","공항시장","신방화역","마곡나루역","양천향교역","가양역","증미역",  
+      "등촌역","염창역","신목동역","선유도역","당산역","국회의사당역","여의도역","샛강역",
+      "노량진역","노들역","흑석역","동작역","구반포","신반포","고속터미널역","사평역",
+      "신논현역","언주역","선정릉역","삼성중앙역","봉은사역","종합운동장역","삼전역",
+      "석촌고분역","석촌역","송파나루역","한성백제역","올림픽공원역","둔촌오륜역","중앙보훈병원"
+    ];
+    const generalSegmentTimes = {
+      "개화->김포공항":5, "김포공항->공항시장":2, "공항시장->신방화역":1, "신방화역->마곡나루역":1,
+      "마곡나루역->양천향교역":2, "양천향교역->가양역":2, "가양역->증미역":2, "증미역->등촌역":2,
+      "등촌역->염창역":2, "염창역->신목동역":1, "신목동역->선유도역":1, "선유도역->당산역":2,
+      "당산역->국회의사당역":2, "국회의사당역->여의도역":2, "여의도역->샛강역":1, "샛강역->노량진역":1,
+      "노량진역->노들역":1, "노들역->흑석역":1, "흑석역->동작역":2, "동작역->구반포":1,
+      "구반포->신반포":1, "신반포->고속터미널역":1, "고속터미널역->사평역":2, "사평역->신논현역":1,
+      "신논현역->언주역":1, "언주역->선정릉역":1, "선정릉역->삼성중앙역":1, "삼성중앙역->봉은사역":1,
+      "봉은사역->종합운동장역":2, "종합운동장역->삼전역":3, "삼전역->석촌고분역":2, "석촌고분역->석촌역":2,
+      "석촌역->송파나루역":2, "송파나루역->한성백제역":2, "한성백제역->올림픽공원역":2,
+      "올림픽공원역->둔촌오륜역":2, "둔촌오륜역->중앙보훈병원":2
+    };
+
+    const expressStations = [
+      "김포공항","마곡나루역","가양역","염창역","당산역","여의도역","노량진역","동작역",
+      "고속터미널역","신논현역","선정릉역","봉은사역","종합운동장역","석촌역","올림픽공원역","중앙보훈병원"
+    ];
+    const expressSegmentTimes = {
+      "김포공항->마곡나루역":3, "마곡나루역->가양역":5, "가양역->염창역":4, "염창역->당산역":4,
+      "당산역->여의도역":4, "여의도역->노량진역":3, "노량진역->동작역":6, "동작역->고속터미널역":3,
+      "고속터미널역->신논현역":2, "신논현역->선정릉역":2, "선정릉역->봉은사역":4, "봉은사역->종합운동장역":2,
+      "종합운동장역->석촌역":3, "석촌역->올림픽공원역":6, "올림픽공원역->중앙보훈병원":4
+    };
+
+    // 시간 파싱/계산 헬퍼
+    function parseTime(s) {
+      const [hh, mm] = s.split(':').map(Number);
+      return hh * 3600 + mm * 60;
+    }
+    function calcArrival(startStation, startSec, targetStation, stations, segMap) {
+      const idxStart = stations.indexOf(startStation);
+      const idxTarget = stations.indexOf(targetStation);
+      if (idxStart < 0 || idxTarget <= idxStart) return null;
+      let sumM = 0;
+      for (let i = idxStart; i < idxTarget; i++) {
+        const key = `${stations[i]}->${stations[i+1]}`;
+        const m = segMap[key];
+        if (m == null) return null;
+        sumM += m;
+      }
+      return startSec + sumM * 60;
+    }
+    function secToHHMM(sec) {
+      const d = new Date(sec * 1000);
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+
+    let routeData = null;
+    let formationMap = {};
+
+    document.getElementById('load').addEventListener('click', async () => {
+      const f1 = document.getElementById('file1').files[0];
+      if (!f1) { alert('입출고 편성표를 선택해주세요'); return; }
+      if (!routeData) {
+        const f2 = document.getElementById('file2').files[0];
+        if (!f2) { alert('행로표 파일을 1회만 업로드해주세요'); return; }
+        const buf2 = await f2.arrayBuffer();
+        const wb2 = XLSX.read(buf2, { type: 'array' });
+        const routeSheet = wb2.Sheets[wb2.SheetNames.find(n => n.includes('행로표')) || wb2.SheetNames[0]];
+        routeData = XLSX.utils.sheet_to_json(routeSheet, { defval: '' });
+        document.getElementById('file2').disabled = true;
+      }
+
+      // 편성표 읽고 맵핑
+      const buf1 = await f1.arrayBuffer();
+      const wb1 = XLSX.read(buf1, { type: 'array' });
+      const diaSheet = wb1.Sheets[wb1.SheetNames.find(n => n.includes('DIA')) || wb1.SheetNames[0]];
+      const data1 = XLSX.utils.sheet_to_json(diaSheet, { defval: '' });
+      formationMap = {};
+      data1.forEach(r => {
+        const no = r['열번'] || r['열차번호'] || r['열차\n번호'];
+        if (no) formationMap[no] = r['편성'];
+      });
+
+      // 요약 계산
+      const stationTimes = { dangsan: { 상행: { 일반: [], 급행: [] }, 하행: { 일반: [], 급행: [] } },
+                             bohun:   { 상행: { 일반: [], 급행: [] }, 하행: { 일반: [], 급행: [] } } };
+      routeData.forEach(r => {
+        const trainNo = r['열차\n번호'] || r['열차번호'];
+        const startStation = r['최초\n출발역'] || r['출발역'];
+        const startTime = r['출발\n시각'] || r['출발시각'];
+        const dir = (r['운행\n방향'] || r['방향'] || '').includes('상') ? '상행' : '하행';
+        const typeKey = trainNo.startsWith('E') ? '급행' : '일반';
+        const startSec = parseTime(startTime);
+        const segMap = trainNo.startsWith('E') ? expressSegmentTimes : generalSegmentTimes;
+        const stations = trainNo.startsWith('E') ? expressStations : generalStations;
+        const dangSec = calcArrival(startStation, startSec, '당산역', stations, segMap);
+        const bohSec  = calcArrival(startStation, startSec, '중앙보훈병원', stations, segMap);
+        if (dangSec) stationTimes.dangsan[dir][typeKey].push(`${trainNo}(${formationMap[trainNo]||''}):${secToHHMM(dangSec)}`);
+        if (bohSec)  stationTimes.bohun[dir][typeKey].push(`${trainNo}(${formationMap[trainNo]||''}):${secToHHMM(bohSec)}`);
+      });
+      // 요약 표시
+      const summaryDiv = document.getElementById('summary'); summaryDiv.innerHTML = '';
+      const names = { dangsan: '당산역', bohun: '중앙보훈병원' };
+      Object.keys(stationTimes).forEach(key => {
+        ['상행','하행'].forEach(dir => {
+          ['일반','급행'].forEach(type => {
+            const list = stationTimes[key][dir][type];
+            if (list.length) {
+              const p = document.createElement('p');
+              p.textContent = `${names[key]} ${dir} ${type} 도착시간: ${list.join(', ')}`;
+              summaryDiv.appendChild(p);
+            }
+          });
+        });
+      });
+
+      // 기존 차트
+      const trains = routeData.map(r => {
+        return {
+          trainNo: r['열차\n번호'] || r['열차번호'],
+          formation: formationMap[r['열차\n번호']||r['열차번호']]||'',
+          from: r['최초\n출발역'] || r['출발역'],
+          start: r['출발\n시각'] || r['출발시각'],
+          to: r['최종\n도착역'] || r['도착역'],
+          end: r['도착\n시각'] || r['도착시각']
+        };
+      }).filter(t => t.trainNo && t.start && t.end);
+      renderChart(trains);
+    });
+
+    function renderChart(trains) {
+      const chart = document.getElementById('chart'); chart.innerHTML = '';
+      const parseTime = s => { const [h,m]=s.split(':').map(Number); return h*3600+m*60; };
+      const times = trains.flatMap(t => [parseTime(t.start), parseTime(t.end)]);
+      const minT = Math.min(...times), maxT = Math.max(...times), total = maxT - minT;
+      trains.forEach(t => {
+        const row = document.createElement('div'); row.className='train-row';
+        const bar = document.createElement('div'); bar.className='train-bar';
+        const st = parseTime(t.start), et = parseTime(t.end);
+        bar.style.left = ((st-minT)/total*100)+'%'; bar.style.width = ((et-st)/total*100)+'%';
+        bar.title = `9호선 ${t.trainNo}(${t.formation}) ${t.from}${t.start}→${t.to}${t.end}`;
+        row.appendChild(bar);
+        const label = document.createElement('span'); label.textContent = `9호선 ${t.trainNo}`;
+        row.appendChild(label);
+        chart.appendChild(row);
+      });
+    }
+  </script>
+</body>
+</html>
